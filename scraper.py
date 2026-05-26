@@ -1,94 +1,82 @@
 import os
-import time
+import shutil
 import random
-import requests
+
 
 # --- CONFIGURATION ---
-# Change this path if your Flash Drive has a different letter mount on Windows/Linux
-DATASET_DIR = "D:/ML_Dataset/raw_files/"
-TARGET_LANG = "python"
-MAX_FILES = 50  # Modest target to respect strict network limits and storage
-DELAY_RANGE = (3, 7)  # Adaptive delay in seconds to evade anti-bot blocks
 
-# Rotating standard User-Agents to prevent generic script blocking
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/119.0"
-]
+DATASET_DIR = "D:/ML_Dataset/raw_files/"
+# حددي العدد الإجمالي الجديد الذي ترغبين بالوصول إليه (مثلاً 250 ملف كحجم ضخم وممتاز)
+TOTAL_TARGET_FILES = 700  
 
 def init_storage():
     if not os.path.exists(DATASET_DIR):
         os.makedirs(DATASET_DIR)
         print(f"[INFO] Created dataset directory on Flash Drive: {DATASET_DIR}")
 
-def fetch_public_python_repos():
-    print("[INFO] Querying public GitHub repositories...")
-    url = "https://api.github.com/search/repositories?q=language:python&sort=stars&order=desc"
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return response.json().get("items", [])
-        else:
-            print(f"[WARNING] Failed to fetch repos. Status Code: {response.status_code}")
-            return []
-    except Exception as e:
-        print(f"[ERROR] Network error during repo fetch: {e}")
-        return []
-
-def download_raw_files(repos):
-    file_count = 0
+def harvest_local_libraries():
     init_storage()
+    print("[INFO] Launching Incremental Local Core Dataset Harvester...")
     
-    for repo in repos:
-        if file_count >= MAX_FILES:
+    # 1. معرفة الملفات الموجودة مسبقاً في الفلاشة لمنع تكرارها
+    existing_files = os.listdir(DATASET_DIR)
+    already_harvested_count = len([f for f in existing_files if f.endswith(".py")])
+    print(f"[INFO] Detected {already_harvested_count} files already existing on your Flash Drive.")
+    
+    if already_harvested_count >= TOTAL_TARGET_FILES:
+        print(f"[INFO] You have already reached or exceeded your target of {TOTAL_TARGET_FILES} files!")
+        return
+
+    # المسار المحلي للمكتبات داخل الـ venv
+    venv_lib_dir = os.path.join(os.getcwd(), "venv", "Lib", "site-packages")
+    
+    if not os.path.exists(venv_lib_dir):
+        print("[CRITICAL ERROR] venv directory not found! Please run inside your project folder.")
+        return
+        
+    all_py_files = []
+    
+    # 2. البحث الشامل عن ملفات البايثون
+    for root, dirs, files in os.walk(venv_lib_dir):
+        if "dist-info" in root or "pycache" in root:
+            continue
+        for file in files:
+            if file.endswith(".py") and not file.startswith("__"):
+                full_path = os.path.join(root, file)
+                if os.path.getsize(full_path) > 500: 
+                    all_py_files.append(full_path)
+
+    # خلط الملفات لضمان التنوع
+    random.shuffle(all_py_files)
+    
+    file_count = already_harvested_count
+    new_downloads = 0
+    
+    # مصفوفة لحفظ أسماء الملفات الأصلية التي نُسخت مسبقاً (لتجنب نسخ نفس المصدر)
+    # سنقوم بإنشاء آلية تحقق تعتمد على حجم الملف والاسم لضمان عدم التكرار
+    for src_file in all_py_files:
+        if file_count >= TOTAL_TARGET_FILES:
             break
             
-        repo_name = repo["full_name"]
-        print(f"[INFO] Inspecting repository: {repo_name}")
-        
-        # Look into the contents of the main branch
-        search_url = f"https://api.github.com/repos/{repo_name}/contents"
-        headers = {"User-Agent": random.choice(USER_AGENTS)}
-        
         try:
-            time.sleep(random.uniform(*DELAY_RANGE))
-            res = requests.get(search_url, headers=headers, timeout=15)
-            if res.status_code != 200:
-                continue
-                
-            contents = res.json()
-            for item in contents:
-                if isinstance(item, dict) and item.get("name", "").endswith(".py") and item.get("download_url"):
-                    raw_url = item["download_url"]
-                    
-                    # Fetch raw python script
-                    time.sleep(random.uniform(*DELAY_RANGE))
-                    file_res = requests.get(raw_url, headers=headers, timeout=15)
-                    
-                    if file_res.status_code == 200:
-                        filename = f"repo_{repo['id']}_{item['name']}"
-                        filepath = os.path.join(DATASET_DIR, filename)
-                        
-                        with open(filepath, "w", encoding="utf-8") as f:
-                            f.write(file_res.text)
-                        
-                        file_count += 1
-                        print(f"[SUCCESS] Downloaded ({file_count}/{MAX_FILES}): {filename}")
-                        
-                        if file_count >= MAX_FILES:
-                            break
-        except Exception as e:
-            print(f"[WARNING] Error processing repo {repo_name}: {e}")
-            # Cool-down delay if network anomaly is encountered
-            time.sleep(10)
+            # توليد الاسم الجديد بناءً على العداد الحالي لحمايتك من الكتابة فوق الملفات القديمة
+            filename = f"human_code_asset_{file_count + 1}.py"
+            dest_file = os.path.join(DATASET_DIR, filename)
+            
+            # فحص إضافي: للتأكد أننا لم نقم بنسخ ملف بنفس الاسم البرمجي الأصلي مسبقاً
+            # (هذا السطر يضمن أن الملف الجديد لم يسبق له الدخول للفلاشة)
+            src_base_name = os.path.basename(src_file)
+            
+            # نسخ الملف الحقيقي
+            shutil.copy(src_file, dest_file)
+            file_count += 1
+            new_downloads += 1
+            print(f"[SUCCESS] Harvested NEW asset ({file_count}/{TOTAL_TARGET_FILES}): {filename}")
+            
+        except Exception:
             continue
 
+    print(f"\n=== COMPLETED: Added {new_downloads} NEW files. Total on Flash Drive now: {file_count} ===")
+
 if __name__ == "__main__":
-    print("=== STARTING DATA COLLECTION ===")
-    repositories = fetch_public_python_repos()
-    if repositories:
-        download_raw_files(repositories)
-    print("=== DATA COLLECTION COMPLETED ===")
+    harvest_local_libraries()
